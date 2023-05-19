@@ -140,6 +140,9 @@ Critiques that restate information in the answer should be false.
 Critiques that are not supported by anything in the answer should be false.
 Critiques that are not supported by anything in the question should be false.
 Critiques that are gibberish should be false.
+Answers that are No answer with a critique should be true.
+Answers with information not included in the article and called out in the critique should be false.
+Questions that are unsupported by anything within the text and called out in the critique should be true.
 
 Choice A: $option_a
 Choice B: $option_b
@@ -158,6 +161,9 @@ Critiques that restate information in the answer should be true.
 Critiques that are not supported by anything in the answer should be true.
 Critiques that are not supported by anything in the question should be true.
 Critiques that are gibberish should be true.
+Answers that are No answer with a critique should be false.
+Answers with information not included in the article and called out in the critique should be true.
+Questions that are unsupported by anything within the text and called out in the critique should be false.
 
 Choice A: $option_a
 Choice B: $option_b
