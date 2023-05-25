@@ -8,7 +8,8 @@ if __name__ == '__main__':
         data = json.load(f)
 
     data = sorted(data, key=lambda x: x['tot_score'] if x['helpful'] else -x['tot_score'])
-
+    false = len([x for x in data if (not x['helpful']) and x['tot_score'] > 0]) + len([x for x in data if (x['helpful']) and x['tot_score'] <= 0])
+    print(f"acc: {1.0 - (false/len(data))}")
     def next_data(index):
         index = int(index) + 1
         return data[index]['text'], index, data[index]['pos'], data[index]['neg'], data[index]['rev_neg'], data[index]['rev_pos'], data[index]['tot_score'], data[index]['helpful']
