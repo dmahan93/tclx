@@ -3,6 +3,8 @@ import asyncio
 from datasets import load_dataset
 import tqdm
 import json
+from transformers import AutoTokenizer
+from tqdm.asyncio import tqdm_asyncio
 
 
 @lmql.query
@@ -86,11 +88,28 @@ async def combine_ratings(passage: str):
     ), (pos_rate[0][0] - pos_rate[0][1]), (neg_rate[0][1] - neg_rate[0][0]), (rev_pos_rate[0][1] - rev_pos_rate[0][0]), (rev_neg_rate[0][0] - rev_neg_rate[0][1])
 
 async def main():
-    dataset = load_dataset("dmayhem93/self-critiquing-helpful-rate")
+    dataset_without_tokens = load_dataset("dmayhem93/self-critiquing-helpful-rate")
+    tokenizer = AutoTokenizer.from_pretrained("CarperAI/stable-vicuna-13b-fp16")
+    def tokenization(example):
+        test_data = tokenizer(example["prompt"])
+        if type(test_data['input_ids'][0]) == list:
+            for i in range(len(test_data['input_ids'])):
+                test_data['input_ids'][i].append(tokenizer.eos_token_id)
+        else:
+            test_data['input_ids'].append(tokenizer.eos_token_id)
+        return test_data
+    dataset = dataset_without_tokens.map(tokenization, batched=True)
     return_values = list()
+    returns = list()
     for i, item in tqdm.tqdm(enumerate(dataset['train'])):
-        return_values.append(combine_ratings(item['prompt']))
-    return_values = await asyncio.gather(*return_values)
+        if len(item['input_ids']) < 1700:
+            return_values.append(combine_ratings(item['prompt']))
+        # if i % 8 == 0:
+        #     returns.extend(await asyncio.gather(*return_values))
+        #     return_values = list()
+    # if len(return_values) > 0:
+    #     returns.extend(await asyncio.gather(*return_values))
+    return_values = await tqdm_asyncio.gather(*return_values)
     with open('ratings.json', 'w') as f:
         json.dump(return_values, f, indent=4)
 
