@@ -5,85 +5,352 @@ from system_messages import get_system_prompt_for_flan2021, \
     get_system_prompt_for_cot, \
     get_system_prompt_for_t0
 import json
+import asyncio
 import tqdm
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
+)  # for exponential backoff
+from check_if_multiple_choice import check_if_multiple_choice
+import time
 
 
-def get_continuation_chatgpt(system: str, user: str) -> str:
+CHATGPT_RATE_LIMIT = 150  # tokens per minute hits hard when there's long context.
+GPT4_RATE_LIMT = 150  # tokens per minute hits hard when there's long context.
+cot_total = 1500
+cot_gpt4_total = cot_total//5
+niv_total = 4400
+niv_gpt4_total = niv_total//5
+flan_total = 25000
+flan_gpt4_total = flan_total//5
+t0_total = 20000
+t0_gpt4_total = t0_total//5
+
+
+@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
+async def chatgpt(messages):
+    """
+    quick try/except to handle invalid input (too long context, mostly) errors.
+
+    Also wrapped with a retry in case of random network errors.
+
+    :param messages: list of messages
+    :return: openai.ChatCompletion
+    """
+    try:
+        return (await openai.ChatCompletion.acreate(
+            model="gpt-3.5-turbo",
+            messages=messages
+        ))
+    except openai.error.InvalidRequestError as e:
+        return None
+
+
+@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
+async def gpt4(messages):
+    """
+    quick try/except to handle invalid input (too long context, mostly) errors.
+
+    :param messages: list of messages
+    :return: openai.ChatCompletion
+    """
+    try:
+        return (await openai.ChatCompletion.acreate(
+            model="gpt-4",
+            messages=messages
+        ))
+    except openai.error.InvalidRequestError as e:
+        return None
+
+
+def get_continuation_chatgpt(system: str, user: str):
+    """
+    helper function to set up the messages list for chatgpt
+    :param system: system message, if applicable
+    :param user: user message
+    :return: openai.ChatCompletion
+    """
     messages = list()
     if system != "":
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
-    return openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=messages
-    ).choices[0].message.content
+    return chatgpt(messages)
 
 
-if __name__ == '__main__':
-    cot = iter(datasets.load_dataset("conceptofmind/cot_submix_original", split="train", streaming=True))
+def get_continuation_gpt4(system: str, user: str):
+    """
+    helper function to set up the messages list for gpt4
+    :param system: system message, if applicable
+    :param user: user message
+    :return: openai.ChatCompletion
+    """
+    messages = list()
+    if system != "":
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
+    return gpt4(messages)
+
+
+async def await_completion_coroutines(coroutines):
+    """
+    Helper function to gather all answers from a list of objects with coroutines.
+    :param coroutines: coroutines to gather answers from
+    :return: objects with answers instead of coroutine answes
+    """
+    answers = await asyncio.gather(
+        *[coroutines[i]['answer'] for i in range(len(coroutines))]
+    )
+    for i in range(len(coroutines)):
+        coroutines[i]['answer'] = answers[i].choices[0].message.content if answers[i] is not None else None
+    time.sleep(60)
+    return coroutines
+
+
+async def collect_cot(cot):
     cot_outputs = list()
-    stream = tqdm.tqdm(cot, total=15)
-    for data in stream:
+    temp_cot_outputs = list()
+    stream = tqdm.tqdm(cot, total=cot_total)
+    for i, data in enumerate(stream):
         if data['template_type'] != 'zs_opt':
             continue
         question = data['inputs']
         system_prompt = get_system_prompt_for_cot()
-        cot_outputs.append({
+        temp_cot_outputs.append({
             "question": question,
             "system_prompt": system_prompt,
             "answer": get_continuation_chatgpt(system_prompt, question),
             "real": data['targets']
         })
-        stream.update(len(cot_outputs))
-        if len(cot_outputs) >= 15:
+        if (len(temp_cot_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
+            print("Waiting for chatgpt to cool down...")
+            cot_outputs.extend(await await_completion_coroutines(temp_cot_outputs))
+            temp_cot_outputs = list()
+        stream.update(len(cot_outputs) + len(temp_cot_outputs))
+        if len(cot_outputs) + len(temp_cot_outputs) >= cot_total:
             break
-    niv = iter(datasets.load_dataset("conceptofmind/niv2_submix_original", split="train", streaming=True))
+    if len(temp_cot_outputs) > 0:
+        cot_outputs.extend(await await_completion_coroutines(temp_cot_outputs))
+    with open("cot_outputs.json", "w", encoding='utf-8') as f:
+        json.dump(cot_outputs, f, indent=4, ensure_ascii=False)
+
+
+async def collect_cot_gpt4(cot):
+    cot_outputs = list()
+    temp_cot_outputs = list()
+    stream = tqdm.tqdm(cot, total=cot_gpt4_total)
+    for i, data in enumerate(stream):
+        if data['template_type'] != 'zs_opt':
+            continue
+        question = data['inputs']
+        system_prompt = get_system_prompt_for_cot()
+        temp_cot_outputs.append({
+            "question": question,
+            "system_prompt": system_prompt,
+            "answer": get_continuation_gpt4(system_prompt, question),
+            "real": data['targets']
+        })
+        if (len(temp_cot_outputs)+1) % GPT4_RATE_LIMT == 0:
+            print("Waiting for chatgpt to cool down...")
+            cot_outputs.extend(await await_completion_coroutines(temp_cot_outputs))
+            temp_cot_outputs = list()
+        stream.update(len(cot_outputs) + len(temp_cot_outputs))
+        if len(cot_outputs) + len(temp_cot_outputs) >= cot_gpt4_total:
+            break
+    if len(temp_cot_outputs) > 0:
+        cot_outputs.extend(await await_completion_coroutines(temp_cot_outputs))
+    with open("cot_outputs_gpt4.json", "w", encoding='utf-8') as f:
+        json.dump(cot_outputs, f, indent=4, ensure_ascii=False)
+
+
+async def collect_niv(niv):
     niv_outputs = list()
-    stream = tqdm.tqdm(niv, total=44)
+    temp_niv_outputs = list()
+    stream = tqdm.tqdm(niv, total=niv_total)
     for data in stream:
         if "zs" not in data['template_type']:
             continue
         question = data['inputs']
         system_prompt = get_system_prompt_for_niv2()
-        niv_outputs.append({
+        temp_niv_outputs.append({
             "question": question,
             "system_prompt": system_prompt,
             "answer": get_continuation_chatgpt(system_prompt, question),
             "real": data['targets']
         })
-        stream.update(len(niv_outputs))
-        if len(niv_outputs) >= 44:
+        if (len(temp_niv_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
+            print("Waiting for chatgpt to cool down...")
+            niv_outputs.extend(await await_completion_coroutines(temp_niv_outputs))
+            temp_niv_outputs = list()
+        stream.update(len(niv_outputs) + len(temp_niv_outputs))
+        if len(niv_outputs) + len(temp_niv_outputs) >= niv_total:
             break
-    with open("cot_outputs.json", "w") as f:
-        json.dump(cot_outputs, f)
-    with open("niv_outputs.json", "w") as f:
-        json.dump(niv_outputs, f)
-    flan = iter(datasets.load_dataset("conceptofmind/flan2021_submix_original", split="train", streaming=True))
+    if len(temp_niv_outputs) > 0:
+        niv_outputs.extend(await await_completion_coroutines(temp_niv_outputs))
+    with open("niv_outputs.json", "w", encoding='utf-8') as f:
+        json.dump(niv_outputs, f, indent=4, ensure_ascii=False)
+
+
+async def collect_niv_gpt4(niv):
+    niv_outputs = list()
+    temp_niv_outputs = list()
+    stream = tqdm.tqdm(niv, total=niv_gpt4_total)
+    for data in stream:
+        if "zs" not in data['template_type']:
+            continue
+        question = data['inputs']
+        system_prompt = get_system_prompt_for_niv2()
+        temp_niv_outputs.append({
+            "question": question,
+            "system_prompt": system_prompt,
+            "answer": get_continuation_gpt4(system_prompt, question),
+            "real": data['targets']
+        })
+        if (len(temp_niv_outputs)+1) % GPT4_RATE_LIMT == 0:
+            print("Waiting for chatgpt to cool down...")
+            niv_outputs.extend(await await_completion_coroutines(temp_niv_outputs))
+            temp_niv_outputs = list()
+        stream.update(len(niv_outputs) + len(temp_niv_outputs))
+        if len(niv_outputs) + len(temp_niv_outputs) >= niv_gpt4_total:
+            break
+    if len(temp_niv_outputs) > 0:
+        niv_outputs.extend(await await_completion_coroutines(temp_niv_outputs))
+    with open("niv_outputs_gpt4.json", "w", encoding='utf-8') as f:
+        json.dump(niv_outputs, f, indent=4, ensure_ascii=False)
+
+
+async def collect_flan(flan):
     flan_outputs = list()
-    while len(flan_outputs) < 250:
-        data = next(flan)
+    temp_flan_outputs = list()
+    stream = tqdm.tqdm(flan, total=flan_total)
+    for data in stream:
         if "zs" not in data['template_type']:
             continue
         question = data['inputs']
         # Need to figure out multiple choice
-        system_prompt = get_system_prompt_for_flan2021(False)
-        flan_outputs.append({
+        system_prompt = get_system_prompt_for_flan2021(check_if_multiple_choice(data))
+        temp_flan_outputs.append({
             "question": question,
             "system_prompt": system_prompt,
             "answer": get_continuation_chatgpt(system_prompt, question),
+            "multiple_choice": check_if_multiple_choice(data),
+            "task_name": data['task_name'],
             "real": data['targets']
         })
-    t0 = iter(datasets.load_dataset("conceptofmind/t0_submix_original", split="train", streaming=True))
+        if (len(temp_flan_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
+            print("Waiting for chatgpt to cool down...")
+            flan_outputs.extend(await await_completion_coroutines(temp_flan_outputs))
+            temp_flan_outputs = list()
+        stream.update(len(flan_outputs) + len(temp_flan_outputs))
+        if len(flan_outputs) + len(temp_flan_outputs) >= flan_total:
+            break
+    if len(temp_flan_outputs) > 0:
+        flan_outputs.extend(await await_completion_coroutines(temp_flan_outputs))
+    with open("flan_outputs.json", "w", encoding='utf-8') as f:
+        json.dump(flan_outputs, f, indent=4, ensure_ascii=False)
+
+
+async def collect_flan_gpt4(flan):
+    flan_outputs = list()
+    temp_flan_outputs = list()
+    stream = tqdm.tqdm(flan, total=flan_gpt4_total)
+    for data in stream:
+        if "zs" not in data['template_type']:
+            continue
+        question = data['inputs']
+        # Need to figure out multiple choice
+        system_prompt = get_system_prompt_for_flan2021(check_if_multiple_choice(data))
+        temp_flan_outputs.append({
+            "question": question,
+            "system_prompt": system_prompt,
+            "answer": get_continuation_gpt4(system_prompt, question),
+            "multiple_choice": check_if_multiple_choice(data),
+            "task_name": data['task_name'],
+            "real": data['targets']
+        })
+        if (len(temp_flan_outputs)+1) % GPT4_RATE_LIMT == 0:
+            print("Waiting for chatgpt to cool down...")
+            flan_outputs.extend(await await_completion_coroutines(temp_flan_outputs))
+            temp_flan_outputs = list()
+        stream.update(len(flan_outputs) + len(temp_flan_outputs))
+        if len(flan_outputs) + len(temp_flan_outputs) >= flan_gpt4_total:
+            break
+    if len(temp_flan_outputs) > 0:
+        flan_outputs.extend(await await_completion_coroutines(temp_flan_outputs))
+    with open("flan_outputs_gpt4.json", "w", encoding='utf-8') as f:
+        json.dump(flan_outputs, f, indent=4, ensure_ascii=False)
+
+
+async def collect_t0(t0):
     t0_outputs = list()
-    while len(t0_outputs) < 200:
-        data = next(t0)
+    temp_t0_outputs = list()
+    stream = tqdm.tqdm(t0, total=t0_total)
+    for data in stream:
         if "zs" not in data['template_type']:
             continue
         question = data['inputs']
         system_prompt = get_system_prompt_for_t0()
-        t0_outputs.append({
+        temp_t0_outputs.append({
             "question": question,
             "system_prompt": system_prompt,
             "answer": get_continuation_chatgpt(system_prompt, question),
             "real": data['targets']
         })
+        if (len(temp_t0_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
+            print("Waiting for chatgpt to cool down...")
+            t0_outputs.extend(await await_completion_coroutines(temp_t0_outputs))
+            temp_t0_outputs = list()
+        stream.update(len(t0_outputs) + len(temp_t0_outputs))
+        if len(t0_outputs) + len(temp_t0_outputs) >= t0_total:
+            break
+    if len(temp_t0_outputs) > 0:
+        t0_outputs.extend(await await_completion_coroutines(temp_t0_outputs))
+    with open("t0_outputs.json", "w", encoding='utf-8') as f:
+        json.dump(t0_outputs, f, indent=4, ensure_ascii=False)
+
+
+async def collect_t0_gpt4(t0):
+    t0_outputs = list()
+    temp_t0_outputs = list()
+    stream = tqdm.tqdm(t0, total=t0_gpt4_total)
+    for data in stream:
+        if "zs" not in data['template_type']:
+            continue
+        question = data['inputs']
+        system_prompt = get_system_prompt_for_t0()
+        temp_t0_outputs.append({
+            "question": question,
+            "system_prompt": system_prompt,
+            "answer": get_continuation_gpt4(system_prompt, question),
+            "real": data['targets']
+        })
+        if (len(temp_t0_outputs)+1) % GPT4_RATE_LIMT == 0:
+            print("Waiting for chatgpt to cool down...")
+            t0_outputs.extend(await await_completion_coroutines(temp_t0_outputs))
+            temp_t0_outputs = list()
+        stream.update(len(t0_outputs) + len(temp_t0_outputs))
+        if len(t0_outputs) + len(temp_t0_outputs) >= t0_gpt4_total:
+            break
+    if len(temp_t0_outputs) > 0:
+        t0_outputs.extend(await await_completion_coroutines(temp_t0_outputs))
+    with open("t0_outputs_gpt4.json", "w", encoding='utf-8') as f:
+        json.dump(t0_outputs, f, indent=4, ensure_ascii=False)
+
+
+async def main():
+    cot = iter(datasets.load_dataset("conceptofmind/cot_submix_original", split="train", streaming=True))
+    niv = iter(datasets.load_dataset("conceptofmind/niv2_submix_original", split="train", streaming=True))
+    flan = iter(datasets.load_dataset("conceptofmind/flan2021_submix_original", split="train", streaming=True))
+    t0 = iter(datasets.load_dataset("conceptofmind/t0_submix_original", split="train", streaming=True))
+    await collect_cot(cot)
+    await collect_niv(niv)
+    await collect_flan(flan)
+    await collect_t0(t0)
+    await collect_cot_gpt4(cot)
+    await collect_niv_gpt4(niv)
+    await collect_flan_gpt4(flan)
+    await collect_t0_gpt4(t0)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
