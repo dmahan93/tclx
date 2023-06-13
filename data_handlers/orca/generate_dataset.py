@@ -1,5 +1,6 @@
 import openai
 import datasets
+import os
 from system_messages import get_system_prompt_for_flan2021, \
     get_system_prompt_for_niv2, \
     get_system_prompt_for_cot, \
@@ -17,7 +18,7 @@ import time
 
 
 CHATGPT_RATE_LIMIT = 150  # tokens per minute hits hard when there's long context.
-GPT4_RATE_LIMT = 150  # tokens per minute hits hard when there's long context.
+GPT4_RATE_LIMT = 90  # tokens per minute hits hard when there's long context.
 cot_total = 1500
 cot_gpt4_total = cot_total//5
 niv_total = 4400
@@ -98,12 +99,13 @@ async def await_completion_coroutines(coroutines):
     :param coroutines: coroutines to gather answers from
     :return: objects with answers instead of coroutine answes
     """
+    start = time.process_time()
     answers = await asyncio.gather(
         *[coroutines[i]['answer'] for i in range(len(coroutines))]
     )
     for i in range(len(coroutines)):
         coroutines[i]['answer'] = answers[i].choices[0].message.content if answers[i] is not None else None
-    time.sleep(60)
+    time.sleep(max(1.0, 70.0 - (time.process_time() - start)))
     return coroutines
 
 
@@ -111,21 +113,32 @@ async def collect_cot(cot):
     cot_outputs = list()
     temp_cot_outputs = list()
     stream = tqdm.tqdm(cot, total=cot_total)
+    counter = 0
+    prev_outputs = list()
+    if os.path.exists("cot_outputs.json"):
+        with open("cot_outputs.json", "r", encoding='utf-8') as f:
+            prev_outputs = json.load(f)
     for i, data in enumerate(stream):
         if data['template_type'] != 'zs_opt':
             continue
         question = data['inputs']
         system_prompt = get_system_prompt_for_cot()
-        temp_cot_outputs.append({
-            "question": question,
-            "system_prompt": system_prompt,
-            "answer": get_continuation_chatgpt(system_prompt, question),
-            "real": data['targets']
-        })
-        if (len(temp_cot_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
-            print("Waiting for chatgpt to cool down...")
-            cot_outputs.extend(await await_completion_coroutines(temp_cot_outputs))
-            temp_cot_outputs = list()
+        if counter < len(prev_outputs):
+            cot_outputs.append(prev_outputs[counter])
+        else:
+            temp_cot_outputs.append({
+                "question": question,
+                "system_prompt": system_prompt,
+                "answer": get_continuation_chatgpt(system_prompt, question),
+                "real": data['targets']
+            })
+            if (len(temp_cot_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
+                print("Waiting for chatgpt to cool down...")
+                cot_outputs.extend(await await_completion_coroutines(temp_cot_outputs))
+                temp_cot_outputs = list()
+                with open("cot_outputs.json", "w", encoding='utf-8') as f:
+                    json.dump(cot_outputs, f, indent=4, ensure_ascii=False)
+        counter += 1
         stream.update(len(cot_outputs) + len(temp_cot_outputs))
         if len(cot_outputs) + len(temp_cot_outputs) >= cot_total:
             break
@@ -139,22 +152,33 @@ async def collect_cot_gpt4(cot):
     cot_outputs = list()
     temp_cot_outputs = list()
     stream = tqdm.tqdm(cot, total=cot_gpt4_total)
+    counter = 0
+    prev_outputs = list()
+    if os.path.exists("cot_outputs_gpt4.json"):
+        with open("cot_outputs_gpt4.json", "r", encoding='utf-8') as f:
+            prev_outputs = json.load(f)
     for i, data in enumerate(stream):
         if data['template_type'] != 'zs_opt':
             continue
         question = data['inputs']
-        system_prompt = get_system_prompt_for_cot()
-        temp_cot_outputs.append({
-            "question": question,
-            "system_prompt": system_prompt,
-            "answer": get_continuation_gpt4(system_prompt, question),
-            "real": data['targets']
-        })
-        if (len(temp_cot_outputs)+1) % GPT4_RATE_LIMT == 0:
-            print("Waiting for chatgpt to cool down...")
-            cot_outputs.extend(await await_completion_coroutines(temp_cot_outputs))
-            temp_cot_outputs = list()
         stream.update(len(cot_outputs) + len(temp_cot_outputs))
+        if counter < len(prev_outputs):
+            cot_outputs.append(prev_outputs[counter])
+        else:
+            system_prompt = get_system_prompt_for_cot()
+            temp_cot_outputs.append({
+                "question": question,
+                "system_prompt": system_prompt,
+                "answer": get_continuation_gpt4(system_prompt, question),
+                "real": data['targets']
+            })
+            if (len(temp_cot_outputs)+1) % GPT4_RATE_LIMT == 0:
+                print("Waiting for chatgpt to cool down...")
+                cot_outputs.extend(await await_completion_coroutines(temp_cot_outputs))
+                temp_cot_outputs = list()
+                with open("cot_outputs_gpt4.json", "w", encoding='utf-8') as f:
+                    json.dump(cot_outputs, f, indent=4, ensure_ascii=False)
+        counter += 1
         if len(cot_outputs) + len(temp_cot_outputs) >= cot_gpt4_total:
             break
     if len(temp_cot_outputs) > 0:
@@ -167,21 +191,32 @@ async def collect_niv(niv):
     niv_outputs = list()
     temp_niv_outputs = list()
     stream = tqdm.tqdm(niv, total=niv_total)
+    counter = 0
+    prev_outputs = list()
+    if os.path.exists("niv_outputs.json"):
+        with open("niv_outputs.json", "r", encoding='utf-8') as f:
+            prev_outputs = json.load(f)
     for data in stream:
         if "zs" not in data['template_type']:
             continue
         question = data['inputs']
-        system_prompt = get_system_prompt_for_niv2()
-        temp_niv_outputs.append({
-            "question": question,
-            "system_prompt": system_prompt,
-            "answer": get_continuation_chatgpt(system_prompt, question),
-            "real": data['targets']
-        })
-        if (len(temp_niv_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
-            print("Waiting for chatgpt to cool down...")
-            niv_outputs.extend(await await_completion_coroutines(temp_niv_outputs))
-            temp_niv_outputs = list()
+        if counter < len(prev_outputs):
+            niv_outputs.append(prev_outputs[counter])
+        else:
+            system_prompt = get_system_prompt_for_niv2()
+            temp_niv_outputs.append({
+                "question": question,
+                "system_prompt": system_prompt,
+                "answer": get_continuation_chatgpt(system_prompt, question),
+                "real": data['targets']
+            })
+            if (len(temp_niv_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
+                print("Waiting for chatgpt to cool down...")
+                niv_outputs.extend(await await_completion_coroutines(temp_niv_outputs))
+                temp_niv_outputs = list()
+                with open("niv_outputs.json", "w", encoding='utf-8') as f:
+                    json.dump(niv_outputs, f, indent=4, ensure_ascii=False)
+        counter += 1
         stream.update(len(niv_outputs) + len(temp_niv_outputs))
         if len(niv_outputs) + len(temp_niv_outputs) >= niv_total:
             break
@@ -195,21 +230,32 @@ async def collect_niv_gpt4(niv):
     niv_outputs = list()
     temp_niv_outputs = list()
     stream = tqdm.tqdm(niv, total=niv_gpt4_total)
+    counter = 0
+    prev_outputs = list()
+    if os.path.exists("niv_outputs_gpt4.json"):
+        with open("niv_outputs_gpt4.json", "r", encoding='utf-8') as f:
+            prev_outputs = json.load(f)
     for data in stream:
         if "zs" not in data['template_type']:
             continue
         question = data['inputs']
-        system_prompt = get_system_prompt_for_niv2()
-        temp_niv_outputs.append({
-            "question": question,
-            "system_prompt": system_prompt,
-            "answer": get_continuation_gpt4(system_prompt, question),
-            "real": data['targets']
-        })
-        if (len(temp_niv_outputs)+1) % GPT4_RATE_LIMT == 0:
-            print("Waiting for chatgpt to cool down...")
-            niv_outputs.extend(await await_completion_coroutines(temp_niv_outputs))
-            temp_niv_outputs = list()
+        if counter < len(prev_outputs):
+            niv_outputs.append(prev_outputs[counter])
+        else:
+            system_prompt = get_system_prompt_for_niv2()
+            temp_niv_outputs.append({
+                "question": question,
+                "system_prompt": system_prompt,
+                "answer": get_continuation_gpt4(system_prompt, question),
+                "real": data['targets']
+            })
+            if (len(temp_niv_outputs)+1) % GPT4_RATE_LIMT == 0:
+                print("Waiting for chatgpt to cool down...")
+                niv_outputs.extend(await await_completion_coroutines(temp_niv_outputs))
+                temp_niv_outputs = list()
+                with open("niv_outputs_gpt4.json", "w", encoding='utf-8') as f:
+                    json.dump(niv_outputs, f, indent=4, ensure_ascii=False)
+        counter += 1
         stream.update(len(niv_outputs) + len(temp_niv_outputs))
         if len(niv_outputs) + len(temp_niv_outputs) >= niv_gpt4_total:
             break
@@ -223,24 +269,35 @@ async def collect_flan(flan):
     flan_outputs = list()
     temp_flan_outputs = list()
     stream = tqdm.tqdm(flan, total=flan_total)
+    counter = 0
+    prev_outputs = list()
+    if os.path.exists("flan_outputs.json"):
+        with open("flan_outputs.json", "r", encoding='utf-8') as f:
+            prev_outputs = json.load(f)
     for data in stream:
         if "zs" not in data['template_type']:
             continue
         question = data['inputs']
-        # Need to figure out multiple choice
-        system_prompt = get_system_prompt_for_flan2021(check_if_multiple_choice(data))
-        temp_flan_outputs.append({
-            "question": question,
-            "system_prompt": system_prompt,
-            "answer": get_continuation_chatgpt(system_prompt, question),
-            "multiple_choice": check_if_multiple_choice(data),
-            "task_name": data['task_name'],
-            "real": data['targets']
-        })
-        if (len(temp_flan_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
-            print("Waiting for chatgpt to cool down...")
-            flan_outputs.extend(await await_completion_coroutines(temp_flan_outputs))
-            temp_flan_outputs = list()
+        if counter < len(prev_outputs):
+            flan_outputs.append(prev_outputs[counter])
+        else:
+            # Need to figure out multiple choice
+            system_prompt = get_system_prompt_for_flan2021(check_if_multiple_choice(data))
+            temp_flan_outputs.append({
+                "question": question,
+                "system_prompt": system_prompt,
+                "answer": get_continuation_chatgpt(system_prompt, question),
+                "multiple_choice": check_if_multiple_choice(data),
+                "task_name": data['task_name'],
+                "real": data['targets']
+            })
+            if (len(temp_flan_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
+                print("Waiting for chatgpt to cool down...")
+                flan_outputs.extend(await await_completion_coroutines(temp_flan_outputs))
+                temp_flan_outputs = list()
+                with open("flan_outputs.json", "w", encoding='utf-8') as f:
+                    json.dump(flan_outputs, f, indent=4, ensure_ascii=False)
+        counter += 1
         stream.update(len(flan_outputs) + len(temp_flan_outputs))
         if len(flan_outputs) + len(temp_flan_outputs) >= flan_total:
             break
@@ -254,24 +311,35 @@ async def collect_flan_gpt4(flan):
     flan_outputs = list()
     temp_flan_outputs = list()
     stream = tqdm.tqdm(flan, total=flan_gpt4_total)
+    counter = 0
+    prev_outputs = list()
+    if os.path.exists("flan_outputs_gpt4.json"):
+        with open("flan_outputs_gpt4.json", "r", encoding='utf-8') as f:
+            prev_outputs = json.load(f)
     for data in stream:
         if "zs" not in data['template_type']:
             continue
-        question = data['inputs']
-        # Need to figure out multiple choice
-        system_prompt = get_system_prompt_for_flan2021(check_if_multiple_choice(data))
-        temp_flan_outputs.append({
-            "question": question,
-            "system_prompt": system_prompt,
-            "answer": get_continuation_gpt4(system_prompt, question),
-            "multiple_choice": check_if_multiple_choice(data),
-            "task_name": data['task_name'],
-            "real": data['targets']
-        })
-        if (len(temp_flan_outputs)+1) % GPT4_RATE_LIMT == 0:
-            print("Waiting for chatgpt to cool down...")
-            flan_outputs.extend(await await_completion_coroutines(temp_flan_outputs))
-            temp_flan_outputs = list()
+        if counter < len(prev_outputs):
+            flan_outputs.append(prev_outputs[counter])
+        else:
+            question = data['inputs']
+            # Need to figure out multiple choice
+            system_prompt = get_system_prompt_for_flan2021(check_if_multiple_choice(data))
+            temp_flan_outputs.append({
+                "question": question,
+                "system_prompt": system_prompt,
+                "answer": get_continuation_gpt4(system_prompt, question),
+                "multiple_choice": check_if_multiple_choice(data),
+                "task_name": data['task_name'],
+                "real": data['targets']
+            })
+            if (len(temp_flan_outputs)+1) % GPT4_RATE_LIMT == 0:
+                print("Waiting for chatgpt to cool down...")
+                flan_outputs.extend(await await_completion_coroutines(temp_flan_outputs))
+                temp_flan_outputs = list()
+                with open("flan_outputs_gpt4.json", "w", encoding='utf-8') as f:
+                    json.dump(flan_outputs, f, indent=4, ensure_ascii=False)
+        counter += 1
         stream.update(len(flan_outputs) + len(temp_flan_outputs))
         if len(flan_outputs) + len(temp_flan_outputs) >= flan_gpt4_total:
             break
@@ -285,21 +353,32 @@ async def collect_t0(t0):
     t0_outputs = list()
     temp_t0_outputs = list()
     stream = tqdm.tqdm(t0, total=t0_total)
+    counter = 0
+    prev_outputs = list()
+    if os.path.exists("t0_outputs.json"):
+        with open("t0_outputs.json", "r", encoding='utf-8') as f:
+            prev_outputs = json.load(f)
     for data in stream:
         if "zs" not in data['template_type']:
             continue
-        question = data['inputs']
-        system_prompt = get_system_prompt_for_t0()
-        temp_t0_outputs.append({
-            "question": question,
-            "system_prompt": system_prompt,
-            "answer": get_continuation_chatgpt(system_prompt, question),
-            "real": data['targets']
-        })
-        if (len(temp_t0_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
-            print("Waiting for chatgpt to cool down...")
-            t0_outputs.extend(await await_completion_coroutines(temp_t0_outputs))
-            temp_t0_outputs = list()
+        if counter < len(prev_outputs):
+            t0_outputs.append(prev_outputs[counter])
+        else:
+            question = data['inputs']
+            system_prompt = get_system_prompt_for_t0()
+            temp_t0_outputs.append({
+                "question": question,
+                "system_prompt": system_prompt,
+                "answer": get_continuation_chatgpt(system_prompt, question),
+                "real": data['targets']
+            })
+            if (len(temp_t0_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
+                print("Waiting for chatgpt to cool down...")
+                t0_outputs.extend(await await_completion_coroutines(temp_t0_outputs))
+                temp_t0_outputs = list()
+                with open("t0_outputs.json", "w", encoding='utf-8') as f:
+                    json.dump(t0_outputs, f, indent=4, ensure_ascii=False)
+        counter += 1
         stream.update(len(t0_outputs) + len(temp_t0_outputs))
         if len(t0_outputs) + len(temp_t0_outputs) >= t0_total:
             break
@@ -313,21 +392,32 @@ async def collect_t0_gpt4(t0):
     t0_outputs = list()
     temp_t0_outputs = list()
     stream = tqdm.tqdm(t0, total=t0_gpt4_total)
+    counter = 0
+    prev_outputs = list()
+    if os.path.exists("t0_outputs_gpt4.json"):
+        with open("t0_outputs_gpt4.json", "r", encoding='utf-8') as f:
+            prev_outputs = json.load(f)
     for data in stream:
         if "zs" not in data['template_type']:
             continue
-        question = data['inputs']
-        system_prompt = get_system_prompt_for_t0()
-        temp_t0_outputs.append({
-            "question": question,
-            "system_prompt": system_prompt,
-            "answer": get_continuation_gpt4(system_prompt, question),
-            "real": data['targets']
-        })
-        if (len(temp_t0_outputs)+1) % GPT4_RATE_LIMT == 0:
-            print("Waiting for chatgpt to cool down...")
-            t0_outputs.extend(await await_completion_coroutines(temp_t0_outputs))
-            temp_t0_outputs = list()
+        if counter < len(prev_outputs):
+            t0_outputs.append(prev_outputs[counter])
+        else:
+            question = data['inputs']
+            system_prompt = get_system_prompt_for_t0()
+            temp_t0_outputs.append({
+                "question": question,
+                "system_prompt": system_prompt,
+                "answer": get_continuation_gpt4(system_prompt, question),
+                "real": data['targets']
+            })
+            if (len(temp_t0_outputs)+1) % GPT4_RATE_LIMT == 0:
+                print("Waiting for chatgpt to cool down...")
+                t0_outputs.extend(await await_completion_coroutines(temp_t0_outputs))
+                temp_t0_outputs = list()
+                with open("t0_outputs_gpt4.json", "w", encoding='utf-8') as f:
+                    json.dump(t0_outputs, f, indent=4, ensure_ascii=False)
+        counter += 1
         stream.update(len(t0_outputs) + len(temp_t0_outputs))
         if len(t0_outputs) + len(temp_t0_outputs) >= t0_gpt4_total:
             break
