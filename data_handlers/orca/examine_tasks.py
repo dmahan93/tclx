@@ -20,6 +20,10 @@ def extract_tasks(json_file):
             continue
         elif "hellaswag" in task['task_name']:
             continue
+        elif "aqua_" in task['task_name']:
+            continue
+        elif "obqa" in task['task_name']:
+            continue
         else:
             filtered.append(task)
             tasks[task['task_name']] += 1
