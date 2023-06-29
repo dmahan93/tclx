@@ -19,13 +19,13 @@ import time
 
 CHATGPT_RATE_LIMIT = 150  # tokens per minute hits hard when there's long context.
 GPT4_RATE_LIMT = 90  # tokens per minute hits hard when there's long context.
-cot_total = 1500
+cot_total = 15000
 cot_gpt4_total = cot_total//5
-niv_total = 4400
+niv_total = 44000
 niv_gpt4_total = niv_total//5
-flan_total = 25000
+flan_total = 250000
 flan_gpt4_total = flan_total//5
-t0_total = 20000
+t0_total = 200000
 t0_gpt4_total = t0_total//5
 
 
@@ -41,7 +41,7 @@ async def chatgpt(messages):
     """
     try:
         return (await openai.ChatCompletion.acreate(
-            model="gpt-3.5-turbo",
+            model="gpt-3.5-turbo-0301",
             messages=messages
         ))
     except openai.error.InvalidRequestError as e:
@@ -58,7 +58,7 @@ async def gpt4(messages):
     """
     try:
         return (await openai.ChatCompletion.acreate(
-            model="gpt-4",
+            model="gpt-4-0314",
             messages=messages
         ))
     except openai.error.InvalidRequestError as e:
@@ -124,12 +124,18 @@ async def collect_cot(cot):
         question = data['inputs']
         system_prompt = get_system_prompt_for_cot()
         if counter < len(prev_outputs):
-            cot_outputs.append(prev_outputs[counter])
+            cot_outputs.append({"question": prev_outputs[counter]['question'],
+                 "system_prompt": prev_outputs[counter]['system_prompt'],
+                 "answer": prev_outputs[counter]['answer'],
+                 "real": data['targets'],
+                 "task_name": data['task_name'],
+                 })
         else:
             temp_cot_outputs.append({
                 "question": question,
                 "system_prompt": system_prompt,
                 "answer": get_continuation_chatgpt(system_prompt, question),
+                "task_name": data['task_name'],
                 "real": data['targets']
             })
             if (len(temp_cot_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
@@ -163,13 +169,19 @@ async def collect_cot_gpt4(cot):
         question = data['inputs']
         stream.update(len(cot_outputs) + len(temp_cot_outputs))
         if counter < len(prev_outputs):
-            cot_outputs.append(prev_outputs[counter])
+            cot_outputs.append({"question": prev_outputs[counter]['question'],
+                 "system_prompt": prev_outputs[counter]['system_prompt'],
+                 "answer": prev_outputs[counter]['answer'],
+                 "real": data['targets'],
+                 "task_name": data['task_name'],
+                 })
         else:
             system_prompt = get_system_prompt_for_cot()
             temp_cot_outputs.append({
                 "question": question,
                 "system_prompt": system_prompt,
                 "answer": get_continuation_gpt4(system_prompt, question),
+                "task_name": data['task_name'],
                 "real": data['targets']
             })
             if (len(temp_cot_outputs)+1) % GPT4_RATE_LIMT == 0:
@@ -201,13 +213,19 @@ async def collect_niv(niv):
             continue
         question = data['inputs']
         if counter < len(prev_outputs):
-            niv_outputs.append(prev_outputs[counter])
+            niv_outputs.append({"question": prev_outputs[counter]['question'],
+                 "system_prompt": prev_outputs[counter]['system_prompt'],
+                 "answer": prev_outputs[counter]['answer'],
+                 "real": data['targets'],
+                 "task_name": data['task_name'],
+                 })
         else:
             system_prompt = get_system_prompt_for_niv2()
             temp_niv_outputs.append({
                 "question": question,
                 "system_prompt": system_prompt,
                 "answer": get_continuation_chatgpt(system_prompt, question),
+                "task_name": data['task_name'],
                 "real": data['targets']
             })
             if (len(temp_niv_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
@@ -240,13 +258,19 @@ async def collect_niv_gpt4(niv):
             continue
         question = data['inputs']
         if counter < len(prev_outputs):
-            niv_outputs.append(prev_outputs[counter])
+            niv_outputs.append({"question": prev_outputs[counter]['question'],
+                 "system_prompt": prev_outputs[counter]['system_prompt'],
+                 "answer": prev_outputs[counter]['answer'],
+                 "real": data['targets'],
+                 "task_name": data['task_name'],
+                 })
         else:
             system_prompt = get_system_prompt_for_niv2()
             temp_niv_outputs.append({
                 "question": question,
                 "system_prompt": system_prompt,
                 "answer": get_continuation_gpt4(system_prompt, question),
+                "task_name": data['task_name'],
                 "real": data['targets']
             })
             if (len(temp_niv_outputs)+1) % GPT4_RATE_LIMT == 0:
@@ -279,7 +303,13 @@ async def collect_flan(flan):
             continue
         question = data['inputs']
         if counter < len(prev_outputs):
-            flan_outputs.append(prev_outputs[counter])
+            flan_outputs.append({"question": prev_outputs[counter]['question'],
+                 "system_prompt": prev_outputs[counter]['system_prompt'],
+                 "answer": prev_outputs[counter]['answer'],
+                 "real": data['targets'],
+                 "multiple_choice": prev_outputs[counter]['multiple_choice'],
+                 "task_name": data['task_name'],
+                 })
         else:
             # Need to figure out multiple choice
             system_prompt = get_system_prompt_for_flan2021(check_if_multiple_choice(data))
@@ -320,7 +350,13 @@ async def collect_flan_gpt4(flan):
         if "zs" not in data['template_type']:
             continue
         if counter < len(prev_outputs):
-            flan_outputs.append(prev_outputs[counter])
+            flan_outputs.append({"question": prev_outputs[counter]['question'],
+                 "system_prompt": prev_outputs[counter]['system_prompt'],
+                 "answer": prev_outputs[counter]['answer'],
+                 "real": data['targets'],
+                 "multiple_choice": prev_outputs[counter]['multiple_choice'],
+                 "task_name": data['task_name'],
+                 })
         else:
             question = data['inputs']
             # Need to figure out multiple choice
@@ -362,7 +398,12 @@ async def collect_t0(t0):
         if "zs" not in data['template_type']:
             continue
         if counter < len(prev_outputs):
-            t0_outputs.append(prev_outputs[counter])
+            t0_outputs.append({"question": prev_outputs[counter]['question'],
+                 "system_prompt": prev_outputs[counter]['system_prompt'],
+                 "answer": prev_outputs[counter]['answer'],
+                 "real": data['targets'],
+                 "task_name": data['task_name'],
+                 })
         else:
             question = data['inputs']
             system_prompt = get_system_prompt_for_t0()
@@ -370,6 +411,7 @@ async def collect_t0(t0):
                 "question": question,
                 "system_prompt": system_prompt,
                 "answer": get_continuation_chatgpt(system_prompt, question),
+                "task_name": data['task_name'],
                 "real": data['targets']
             })
             if (len(temp_t0_outputs)+1) % CHATGPT_RATE_LIMIT == 0:
@@ -401,7 +443,12 @@ async def collect_t0_gpt4(t0):
         if "zs" not in data['template_type']:
             continue
         if counter < len(prev_outputs):
-            t0_outputs.append(prev_outputs[counter])
+            t0_outputs.append({"question": prev_outputs[counter]['question'],
+                 "system_prompt": prev_outputs[counter]['system_prompt'],
+                 "answer": prev_outputs[counter]['answer'],
+                 "real": data['targets'],
+                 "task_name": data['task_name'],
+                 })
         else:
             question = data['inputs']
             system_prompt = get_system_prompt_for_t0()
@@ -409,6 +456,7 @@ async def collect_t0_gpt4(t0):
                 "question": question,
                 "system_prompt": system_prompt,
                 "answer": get_continuation_gpt4(system_prompt, question),
+                "task_name": data['task_name'],
                 "real": data['targets']
             })
             if (len(temp_t0_outputs)+1) % GPT4_RATE_LIMT == 0:
