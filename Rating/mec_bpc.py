@@ -33,8 +33,9 @@ def extract_rating(rating):
 
 
 def get_eval(system_prompt, user_prompt: str):
-    ratings = [-1 for _ in range(3)]
+    ratings = [None for _ in range(3)]
     for rating_idx in range(3):
+        retry_count = 0
         for _ in range(MAX_API_RETRY):
             try:
                 messages = [{"role": "system", "content": system_prompt}] if system_prompt else []
@@ -47,13 +48,19 @@ def get_eval(system_prompt, user_prompt: str):
                 )
 
                 ratings[rating_idx] = response["choices"][0]["message"]["content"]
-
+                break
             except Exception as e:
                 print(e)
                 sleep(REQ_TIME_GAP)
-
-        raise Exception(f"Failed after {MAX_API_RETRY} retries.")
-    return ratings
+                retry_count += 1
+        if retry_count == MAX_API_RETRY:
+            raise Exception(f"Failed after {MAX_API_RETRY} retries.")
+    score = [extract_rating(rating) for rating in ratings]
+    score = [s for s in score if s is not None]
+    if len(score) == 0:
+        return ratings, None
+    else:
+        return ratings, sum(score) / len(score)
 
 
 mecbpc_template = Template("""[Question]
@@ -90,14 +97,21 @@ def mecpbc_score(systems: Optional[List[str]], prompts: List[str], outputs: List
     data = []
     for system, prompt, output in tqdm(zip(systems, prompts, outputs)):
         rating = get_eval(system, mecbpc_template.substitute(q=prompt, a1=output[0], a2=output[1]))
-
-        score = rating[-1]
-
-        data.append({"prompt": prompt, "output": output, "critique": rating, "score": score})
+        mirror_rating = get_eval(system, mecbpc_template.substitute(q=prompt, a1=output[1], a2=output[0]))
+        if rating[1] is None or mirror_rating[1] is None:
+            score = None
+        else:
+            score = (rating[-1] + mirror_rating[-1]) / 2
+        data.append({"prompt": prompt,
+                     "output": output,
+                     "critique": rating[0],
+                     "mirrored_critique": mirror_rating[0],
+                     "score": score})
         with open("mec_pbc.json", "w") as f:
             json.dump(data, f, indent=4)
 
     return [d["score"] for d in data]
+
 
 if __name__ == '__main__':
     scores = mecpbc_score(
